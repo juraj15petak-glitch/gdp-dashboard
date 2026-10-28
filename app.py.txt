@@ -1,0 +1,256 @@
+import os
+from datetime import date
+
+import pandas as pd
+import streamlit as st
+
+# ---------------------------------------------------------------
+# Nastavenia
+# ---------------------------------------------------------------
+st.set_page_config(page_title="AI Agentúra – interný nástroj", page_icon="🤖", layout="wide")
+
+CSV_SUBOR = "klienti.csv"
+STAVY = ["Nový lead", "Oslovený", "Rokovanie", "Ponuka odoslaná", "Uzavretý", "Zamietnutý"]
+TYPY_AUTOMATIZACIE = [
+    "Make.com webhook",
+    "Rezervačný systém",
+    "Automatické e-maily",
+    "Fakturácia",
+    "CRM integrácia",
+    "AI chatbot",
+    "Iné",
+]
+STLPCE = ["Dátum pridania", "Firma", "Kontakt", "Stav rokovania", "Typ automatizácie", "Poznámka"]
+
+
+# ---------------------------------------------------------------
+# Práca s dátami
+# ---------------------------------------------------------------
+def nacitaj_klientov() -> pd.DataFrame:
+    if os.path.exists(CSV_SUBOR):
+        try:
+            return pd.read_csv(CSV_SUBOR).reindex(columns=STLPCE).fillna("")
+        except Exception:
+            pass
+    return pd.DataFrame(columns=STLPCE)
+
+
+def uloz_klientov(df: pd.DataFrame) -> None:
+    df.to_csv(CSV_SUBOR, index=False)
+
+
+if "klienti" not in st.session_state:
+    st.session_state.klienti = nacitaj_klientov()
+
+
+# ---------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------
+st.sidebar.title("🤖 AI Agentúra")
+st.sidebar.caption("Interný nástroj na správu klientov a leadov")
+strana = st.sidebar.radio(
+    "Menu",
+    ["📋 Prehľad klientov", "✉️ Generátor AI oslovení", "💰 Kalkulátor úspor"],
+)
+st.sidebar.divider()
+st.sidebar.metric("Počet klientov v databáze", len(st.session_state.klienti))
+
+
+# ---------------------------------------------------------------
+# 1) Prehľad klientov
+# ---------------------------------------------------------------
+if strana == "📋 Prehľad klientov":
+    st.title("📋 Prehľad klientov")
+
+    with st.expander("➕ Pridať nového klienta", expanded=True):
+        with st.form("novy_klient", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            firma = c1.text_input("Meno firmy *")
+            kontakt = c2.text_input("Kontakt (e-mail / telefón) *")
+            stav = c1.selectbox("Stav rokovania", STAVY)
+            typ = c2.selectbox("Typ automatizácie", TYPY_AUTOMATIZACIE)
+            poznamka = st.text_area("Poznámka", height=80)
+            odoslat = st.form_submit_button("Pridať klienta", type="primary")
+
+        if odoslat:
+            if not firma.strip() or not kontakt.strip():
+                st.error("Vyplň aspoň meno firmy a kontakt.")
+            else:
+                novy = pd.DataFrame(
+                    [{
+                        "Dátum pridania": date.today().strftime("%d.%m.%Y"),
+                        "Firma": firma.strip(),
+                        "Kontakt": kontakt.strip(),
+                        "Stav rokovania": stav,
+                        "Typ automatizácie": typ,
+                        "Poznámka": poznamka.strip(),
+                    }]
+                )
+                st.session_state.klienti = pd.concat(
+                    [st.session_state.klienti, novy], ignore_index=True
+                )
+                uloz_klientov(st.session_state.klienti)
+                st.success(f"Klient „{firma}“ bol pridaný.")
+                st.rerun()
+
+    st.subheader("Zoznam klientov")
+    st.caption("Bunky môžeš upravovať priamo v tabuľke, riadky pridávať alebo mazať. Nezabudni zmeny uložiť.")
+
+    if st.session_state.klienti.empty:
+        st.info("Zatiaľ tu nie sú žiadni klienti. Pridaj prvého cez formulár vyššie.")
+    else:
+        filter_stav = st.multiselect("Filtrovať podľa stavu", STAVY)
+        zobrazene = st.session_state.klienti
+        if filter_stav:
+            zobrazene = zobrazene[zobrazene["Stav rokovania"].isin(filter_stav)]
+
+        upravene = st.data_editor(
+            zobrazene,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Stav rokovania": st.column_config.SelectboxColumn(options=STAVY, required=True),
+                "Typ automatizácie": st.column_config.SelectboxColumn(options=TYPY_AUTOMATIZACIE),
+                "Dátum pridania": st.column_config.TextColumn(disabled=True),
+            },
+            key="editor_klientov",
+        )
+
+        c1, c2 = st.columns([1, 1])
+        if c1.button("💾 Uložiť zmeny"):
+            if filter_stav:
+                st.warning("Pri aktívnom filtri zmeny neukladám. Zruš filter a ulož znova.")
+            else:
+                st.session_state.klienti = upravene.reset_index(drop=True)
+                uloz_klientov(st.session_state.klienti)
+                st.success("Zmeny uložené.")
+        c2.download_button(
+            "⬇️ Stiahnuť ako CSV",
+            data=st.session_state.klienti.to_csv(index=False).encode("utf-8-sig"),
+            file_name="klienti.csv",
+            mime="text/csv",
+        )
+
+        st.subheader("Prehľad podľa stavu")
+        st.bar_chart(st.session_state.klienti["Stav rokovania"].value_counts())
+
+
+# ---------------------------------------------------------------
+# 2) Generátor oslovení
+# ---------------------------------------------------------------
+elif strana == "✉️ Generátor AI oslovení":
+    st.title("✉️ Generátor AI oslovení")
+    st.caption("Vygeneruje návrh predajného e-mailu na základe názvu firmy a odboru.")
+
+    SABLONY = {
+        "Rezervácie a objednávky": "automatické rezervácie a pripomienky termínov",
+        "Spracovanie dopytov": "automatické odpovede na dopyty a ich zápis do CRM",
+        "Fakturácia a administratíva": "automatizáciu fakturácie a opakovanej administratívy",
+        "Prepojenie systémov (Make.com)": "prepojenie vašich nástrojov cez Make.com, aby si dáta posielali samé",
+    }
+
+    with st.form("oslovenie"):
+        c1, c2 = st.columns(2)
+        nazov = c1.text_input("Názov firmy", placeholder="napr. Autoservis Novák")
+        odbor = c2.text_input("Odbor podnikania", placeholder="napr. autoservis, zubná ambulancia, e-shop")
+        c3, c4 = st.columns(2)
+        zameranie = c3.selectbox("Čo ponúkate", list(SABLONY.keys()))
+        ton = c4.radio("Tón e-mailu", ["Formálny", "Priateľský"], horizontal=True)
+        meno_odosielatela = st.text_input("Vaše meno / agentúra", value="")
+        generovat = st.form_submit_button("Vygenerovať e-mail", type="primary")
+
+    if generovat:
+        if not nazov.strip() or not odbor.strip():
+            st.error("Zadaj názov firmy aj odbor.")
+        else:
+            podpis = meno_odosielatela.strip() or "[Vaše meno]"
+            ponuka = SABLONY[zameranie]
+            if ton == "Formálny":
+                oslovenie = f"Dobrý deň, tím {nazov},"
+                zaver = "S pozdravom"
+            else:
+                oslovenie = f"Ahoj, tím {nazov},"
+                zaver = "Pekný deň"
+
+            predmet = f"Ako ušetriť čas v {odbor} vďaka automatizácii"
+            telo = f"""{oslovenie}
+
+pri firmách v oblasti „{odbor}“ vidím opakovane ten istý problém: tím trávi hodiny týždenne manuálnou administratívou, ktorá nepridáva žiadnu hodnotu a odvádza pozornosť od zákazníkov.
+
+Pomáhame firmám ako {nazov} nastaviť {ponuka}. Výsledok:
+• menej ručnej práce a menej chýb,
+• rýchlejšia reakcia na zákazníkov,
+• viac času na to, v čom ste naozaj dobrí.
+
+Navrhujem krátky 15-minútový hovor, na ktorom si spolu prejdeme, čo by sa dalo automatizovať práve u vás, bez záväzkov. Hodil by sa vám niektorý deň tento alebo budúci týždeň?
+
+{zaver},
+{podpis}"""
+
+            st.subheader("Návrh e-mailu")
+            st.text_input("Predmet", value=predmet)
+            st.text_area("Text e-mailu", value=telo, height=380)
+            st.caption("Skopíruj text, uprav ho podľa potreby a odošli. Šablóny môžeš zmeniť priamo v kóde.")
+            st.download_button(
+                "⬇️ Stiahnuť ako .txt",
+                data=f"Predmet: {predmet}\n\n{telo}".encode("utf-8"),
+                file_name=f"osloveni_{nazov.strip().replace(' ', '_')}.txt",
+            )
+
+
+# ---------------------------------------------------------------
+# 3) Kalkulátor úspor
+# ---------------------------------------------------------------
+elif strana == "💰 Kalkulátor úspor":
+    st.title("💰 Kalkulátor úspor pre firmy")
+    st.caption("Ukáž klientovi, koľko času a peňazí mu automatizácia reálne ušetrí.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        hodiny = st.slider("Hodín týždenne strávených manuálnou administratívou", 1, 80, 10)
+        pocet_ludi = st.slider("Koľko ľudí sa na tom podieľa", 1, 20, 1)
+        sadzba = st.number_input("Náklady na hodinu práce (€/h)", min_value=1.0, value=12.0, step=1.0)
+    with c2:
+        miera = st.slider("Odhadovaná miera automatizácie (%)", 10, 95, 70)
+        cena_nastavenia = st.number_input("Jednorazová cena nastavenia (€)", min_value=0.0, value=800.0, step=50.0)
+        mesacny_poplatok = st.number_input("Mesačný poplatok za správu (€)", min_value=0.0, value=100.0, step=10.0)
+
+    TYZDNE_V_MESIACI = 52 / 12
+    usetrene_hod_tyzden = hodiny * pocet_ludi * miera / 100
+    usetrene_hod_mesiac = usetrene_hod_tyzden * TYZDNE_V_MESIACI
+    usetrene_hod_rok = usetrene_hod_tyzden * 52
+
+    usetrene_eur_mesiac = usetrene_hod_mesiac * sadzba
+    usetrene_eur_rok = usetrene_hod_rok * sadzba
+
+    cisty_mesacny_zisk = usetrene_eur_mesiac - mesacny_poplatok
+    cisty_rocny_zisk = usetrene_eur_rok - mesacny_poplatok * 12 - cena_nastavenia
+
+    st.divider()
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Ušetrený čas / týždeň", f"{usetrene_hod_tyzden:.1f} h")
+    m2.metric("Ušetrený čas / mesiac", f"{usetrene_hod_mesiac:.1f} h")
+    m3.metric("Ušetrený čas / rok", f"{usetrene_hod_rok:.0f} h")
+
+    m4, m5, m6 = st.columns(3)
+    m4.metric("Úspora / mesiac", f"{usetrene_eur_mesiac:,.0f} €".replace(",", " "))
+    m5.metric("Úspora / rok", f"{usetrene_eur_rok:,.0f} €".replace(",", " "))
+    m6.metric(
+        "Čistý zisk v 1. roku",
+        f"{cisty_rocny_zisk:,.0f} €".replace(",", " "),
+        help="Úspora mínus cena nastavenia a poplatky za 12 mesiacov",
+    )
+
+    if cisty_mesacny_zisk > 0:
+        navratnost = cena_nastavenia / cisty_mesacny_zisk
+        st.success(f"Investícia sa vráti približne za **{navratnost:.1f} mesiaca**.")
+    else:
+        st.warning("Pri týchto parametroch sa investícia nevracia. Zvýš automatizáciu alebo uprav ceny.")
+
+    # Graf kumulatívnej úspory za 12 mesiacov
+    mesiace = list(range(0, 13))
+    kumulativne = [-cena_nastavenia + m * cisty_mesacny_zisk for m in mesiace]
+    graf = pd.DataFrame({"Mesiac": mesiace, "Kumulatívny čistý zisk (€)": kumulativne}).set_index("Mesiac")
+    st.subheader("Vývoj čistého zisku za 12 mesiacov")
+    st.line_chart(graf)
